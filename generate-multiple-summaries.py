@@ -1,3 +1,6 @@
+"""
+Run the Jupyter notebook as a batch job.
+"""
 from pathlib import Path
 
 import papermill as pm
@@ -16,9 +19,11 @@ companies = [
     ("https://renagadetx.com", "renagade"),
     ("https://arbor.bio", "arbor")
 ]
+notebooks_dir = Path.cwd() / "summaries" / "notebooks" 
+notebooks_dir.mkdir(parents=False, exist_ok=True)
 for company_URL, company_name in companies:
     pm.execute_notebook(
         "generate-company-summary.ipynb",
-        Path.cwd() / "dossiers" / "notebooks" / f"{company_name}.ipynb",
+        notebooks_dir / f"{company_name}.ipynb",
         parameters=dict(company_URL=company_URL,
                         enable_test_harness=False))

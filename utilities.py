@@ -4,18 +4,24 @@ Utility functions.
 To run tests: python3 -m doctest utilities.py
 """
 
-import os, re
-from typing import Iterable, List, Any, Optional, Tuple
+import os, re, json
+from typing import Iterable, List, Optional, Tuple, Callable, Dict, Union
 from uuid import uuid4
 from io import BytesIO
-from pathlib import Path
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
+from urllib3.exceptions import MaxRetryError 
+import multiprocessing.dummy
+from functools import partial
+from enum import Enum
 
+import jinja2
 import requests
 from bs4 import BeautifulSoup
-from langchain_community.llms import Bedrock
 from langchain_community.document_loaders import AmazonTextractPDFLoader
+from botocore.exceptions import ClientError
+
+JENV = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
 
 
 def google_search(q: str, num_results: int = 5, timeout: int = 20):
@@ -32,14 +38,14 @@ def google_search(q: str, num_results: int = 5, timeout: int = 20):
     return response.json()
 
 
-user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0"
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0"
 
 
 def download_web_page(URL: str, mime_type: str = "text/html",
                       headers: dict = None) -> str:
     print(f"download_web_page {URL}")
     headers = headers or {
-        "User-Agent": user_agent,
+        "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.5"
@@ -50,7 +56,6 @@ def download_web_page(URL: str, mime_type: str = "text/html",
     except (requests.exceptions.Timeout, ConnectionError, TimeoutError) as ex:
         print(f"Failed to download {URL}: {ex}")
         return None
-    # (Path.cwd() / "raw-download.html").write_text(resp.text)
     if mime_type is None:
         return resp
     elif mime_type not in resp.headers["Content-Type"]:
@@ -63,16 +68,21 @@ def download_web_page_as_text(
     URL: str, s3_client, textract_client,
     bucket_name: str,
     headers: dict = None,
+    allowable_mime_types = ["text/html", "application/pdf"],
     allow_only_single_page_PDFs: bool = False) -> Optional[str]:
     """
     Return a textual version of this page, whether the page is HTML or PDF.
     """
     resp = download_web_page(URL, mime_type=None, headers=headers)
     if resp and resp.status_code == 200:
-        if "text/html" in resp.headers["Content-Type"]:
+        if allowable_mime_types is not None and \
+           not any(mime_type in resp.headers["Content-Type"]
+                   for mime_type in allowable_mime_types):
+            print(f"Discarding {URL} as mime type {resp.headers['Content-Type']} "
+                  f"not in the allowed set {allowable_mime_types}")
+            return None
+        elif "text/html" in resp.headers["Content-Type"]:
             html_contents = remove_noise_from_web_page(resp.text)
-            # print(f"~#tokens {round(len(html_contents)*(4/3))}")
-            # (Path.cwd() / "html-contents.text").write_text(html_contents)
             return html_contents
         elif "application/pdf" in resp.headers["Content-Type"]:
             docs = convert_pdf_to_text(s3_client, textract_client,
@@ -124,7 +134,13 @@ def remove_noise_from_web_page(html_contents: str) -> str:
     try:
         soup = BeautifulSoup(html_contents, features="html.parser")
         [body] = soup.findAll("body")
-        return soup.get_text()
+        return body.get_text()
+    except ValueError as ex:
+        if "not enough values to unpack" in str(ex):
+            print(f"Couldn't find <body> tag: {html_contents}")
+            return str
+        else:
+            raise ex
     except Exception as ex:
         print(f"Caught in remove_noise_from_web_page: {ex}")
         return ""
@@ -215,44 +231,48 @@ def extract_tag(response: str, name: str, greedy: bool = True,
     return "", -1
 
 
-# log_file = Path.cwd() / "prompt-log.txt" # uncomment to log prompts
-log_file = None
-
-
-class WrappedBedrock (Bedrock):
-
+def create_bedrock_runner(bedrock_runtime,
+                          model_id: str,
+                          temperature: float) -> Callable:
     """
-    A plug-in replacement for the Bedrock class that automatically
-    takes care of adding "Human: ... Assistant: ..." for Claude.
+    A convenient to bake parameters like model_id into a callable function.
     """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    return partial(run_bedrock,
+                   bedrock_runtime=bedrock_runtime,
+                   model_id=model_id,
+                   temperature=temperature)
 
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager=None,
-        **kwargs: Any,
-    ) -> str:
-        if log_file:
-            with log_file.open("a") as f:
-                f.write(f"-----Prompt:------\n{prompt}\n"
-                        "-----end prompt-----\n")
 
-        if not re.match(r"^[\n]{2,}Human:", prompt):
-            if prompt.startswith("Human:"):
-                prompt = "\n\n" + prompt
-            else:
-                prompt = f"""\n\nHuman:\n{prompt}\n\nAssistant:"""
-        response = super()._call(prompt, stop, run_manager, **kwargs)
+def run_bedrock(prompt: str,
+                bedrock_runtime,
+                model_id: str,
+                temperature: float) -> str:
+    try:
+        response = bedrock_runtime.invoke_model(
+            modelId=model_id,
+            body=json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 1024,
+                    "temperature": temperature,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                        }
+                    ],
+                }
+            ),
+        )
+        result = json.loads(response.get("body").read())
+        output_list = result.get("content", [])
+        return "".join(output["text"] for output in output_list
+                       if output["type"] == "text")
 
-        if log_file:
-            with log_file.open("a") as f:
-                f.write(f"-----Response:------\n{response}"
-                        "\n-----end response-----\n")
-        return response
+    except ClientError as err:
+        print(f"Error invoking {model_id}: {err.response['Error']['Code']} "
+              f"{err.response['Error']['Message']}")
+        raise err
 
 
 def convert_pdf_to_text(s3_client,
@@ -324,3 +344,146 @@ def most_common_elem(l: list):
     'b'
     """
     return max(set(l), key=l.count)
+
+
+def parallel_map(func: Callable, sequence: Iterable, num_threads: Optional[int] = 10) -> Iterable:
+    """
+
+    >>> list(parallel_map(lambda x: x+1, range(10), num_threads=1))
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    >>> list(parallel_map(lambda x: x+1, range(10), num_threads=5))
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    """
+    if num_threads == 1:
+        # Much easier to test if we turn off the concurrent map
+        return map(func, sequence)
+    else:
+        pool = multiprocessing.dummy.Pool(num_threads)
+        return pool.map(func, sequence)
+
+
+def search_result_downloader(bucket_name: str,
+                             headers: dict,
+                             s3_client,
+                             textract_client,
+                             search_result: dict,
+                             allowable_mime_types = ["text/html", "application/pdf"],
+                             allow_only_single_page_PDFs: bool = None,
+                             cached_contents: Dict[str, str] = None) -> str:
+    URL = search_result["link"]
+    try:
+        if cached_contents and URL in cached_contents:
+            content = cached_contents[URL]
+        else:
+            content = download_web_page_as_text(URL, s3_client, textract_client,
+                                                bucket_name, headers=headers,
+                                                allowable_mime_types=allowable_mime_types,
+                                                allow_only_single_page_PDFs=allow_only_single_page_PDFs)
+    except (ConnectionError, MaxRetryError) as ex:
+        print(f"Failed to download {URL}: {ex}")
+        content = None
+    return content
+
+
+def default_reducer(map_results: Iterable[Union[str, dict]],
+                    model_runner: Callable[[str], str]) -> str:
+    prompt_template = strip_multiline_whitespace("""\
+        Please consider the following snippets:
+    
+        {% for mr in map_results %}
+        <snippet>
+        {{ mr }}
+        </snippet>
+        {% endfor %}
+    
+        Summarize the above snippets in 5-6 sentences. Don't include any preamble. Include your
+        summary in <summary></summary> tags.
+        """)
+    prompt = JENV.from_string(prompt_template).render(map_results=map_results)
+    result = model_runner(prompt)
+    tags = extract_multiple_tags(result)
+    try:
+        return_value = tags["summary"]
+    except KeyError:
+        return_value = ""
+    return return_value
+
+
+class RAG_Mode(Enum):
+    MAP_REDUCE = 0
+    FIRST_HIT = 1
+
+def RAG_over_Google(
+    model_runner: Callable[[str], str],
+    company_name: str,
+    company_url: str,
+    google_query: str,
+    num_threads: int,
+    search_result_downloader: Callable[[dict, dict], str] = None,
+    search_result_mapper: Callable[[dict, str], Union[str, dict]] = None,
+    search_result_filter: Optional[Callable[[int, dict], Tuple[bool, str]]] = None,
+    search_result_evaluator: Callable[[dict, Union[str, dict]], bool] = None,
+    reducer: Callable[[Iterable[Union[str, dict]]], str] = None,
+    num_google_results: Optional[int] = 10,
+    google_timeout: Optional[int] = 30,
+    mode: RAG_Mode = RAG_Mode.MAP_REDUCE,
+    result_tag: Optional[str] = "summary"):
+    """
+    The downloader takes a search result (a dict) and a dict of cached contents
+    (URL => str) and returns the downloaded contents (a str)
+
+    The mapper takes a str (typically the output of the downloader) and returns
+    another str (typically the result of using an LLM to analyze the input str).
+
+    The filter takes a search result (a dict)
+    """
+    response_json = google_search(google_query,
+                                  num_results=num_google_results,
+                                  timeout=google_timeout)
+    try:
+        organic_results = response_json["organic_results"]
+    except KeyError:
+        print("Warning: Google returned 0 results for this query")
+        organic_results = []
+
+    for result in organic_results:
+        print(f"Result: {result['link']}")
+
+    cached_contents = {}
+    if search_result_filter is not None:
+        results = []
+        for idx, result in enumerate(organic_results):
+            selected, contents = search_result_filter(idx, result)
+            if selected:
+                results.append(result)
+                cached_contents[result["link"]] = contents
+    else:
+        results = organic_results
+
+    if mode.value == RAG_Mode.MAP_REDUCE.value:
+        assert search_result_mapper is not None and search_result_downloader is not None
+        if reducer is None:
+            reducer = partial(default_reducer, model_runner=model_runner)
+        map_results = parallel_map(lambda result: search_result_mapper(
+                                                    search_result=result,
+                                                    text_contents=search_result_downloader(
+                                                        search_result=result,
+                                                        cached_contents=cached_contents)),
+                                   results, num_threads=num_threads)
+        map_results = filter(None, map_results) # remove empty elements
+        return reducer(map_results)
+    elif mode.value == RAG_Mode.FIRST_HIT.value:
+        assert search_result_evaluator is not None
+        for i, search_result in enumerate(results):
+            print(f"Consider #{i:,} {search_result['link']}")
+            mapper_result = search_result_mapper(
+                              search_result=search_result,
+                              text_contents=search_result_downloader(search_result=search_result,
+                                                                     cached_contents=cached_contents))
+            if search_result_evaluator(search_result,
+                                       mapper_result=mapper_result):
+                return mapper_result
+    else:
+        raise Exception("port me!")
