@@ -10,16 +10,17 @@ from uuid import uuid4
 from io import BytesIO
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
-from urllib3.exceptions import MaxRetryError 
+from urllib3.exceptions import MaxRetryError, TimeoutError
 import multiprocessing.dummy
 from functools import partial
 from enum import Enum
+from time import sleep
 
 import jinja2
 import requests
 from bs4 import BeautifulSoup
 from langchain_community.document_loaders import AmazonTextractPDFLoader
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 JENV = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
 
@@ -75,16 +76,18 @@ def download_web_page_as_text(
     """
     resp = download_web_page(URL, mime_type=None, headers=headers)
     if resp and resp.status_code == 200:
+        print(f"headers: {resp.headers}")
+        content_type = resp.headers.get("Content-Type", "unknown")
         if allowable_mime_types is not None and \
-           not any(mime_type in resp.headers["Content-Type"]
+           not any(mime_type in content_type
                    for mime_type in allowable_mime_types):
-            print(f"Discarding {URL} as mime type {resp.headers['Content-Type']} "
+            print(f"Discarding {URL} as mime type {content_type} "
                   f"not in the allowed set {allowable_mime_types}")
             return None
-        elif "text/html" in resp.headers["Content-Type"]:
+        elif "text/html" in content_type:
             html_contents = remove_noise_from_web_page(resp.text)
             return html_contents
-        elif "application/pdf" in resp.headers["Content-Type"]:
+        elif "application/pdf" in content_type:
             docs = convert_pdf_to_text(s3_client, textract_client,
                                        bucket_name, resp.content)
             if allow_only_single_page_PDFs and len(docs) > 1:
@@ -97,7 +100,7 @@ def download_web_page_as_text(
                 text = convert_textract_output_to_text(docs)
                 return text
         else:
-            print(f'Ignoring content type: {resp.headers["Content-Type"]}')
+            print(f'Ignoring content type: {content_type}')
             return None
     else:
         print(f"Failed to download from {URL}, response: {resp}")
@@ -235,7 +238,7 @@ def create_bedrock_runner(bedrock_runtime,
                           model_id: str,
                           temperature: float) -> Callable:
     """
-    A convenient to bake parameters like model_id into a callable function.
+    A convenient way to bake parameters like model_id into a callable function.
     """
     return partial(run_bedrock,
                    bedrock_runtime=bedrock_runtime,
@@ -248,30 +251,45 @@ def run_bedrock(prompt: str,
                 model_id: str,
                 temperature: float) -> str:
     try:
-        response = bedrock_runtime.invoke_model(
-            modelId=model_id,
-            body=json.dumps(
-                {
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 1024,
-                    "temperature": temperature,
-                    "messages": [
+        # print(f"prompt: {prompt}")
+        response = None
+        for iter in range(10):
+            try:
+                response = bedrock_runtime.invoke_model(
+                    modelId=model_id,
+                    body=json.dumps(
                         {
-                            "role": "user",
-                            "content": [{"type": "text", "text": prompt}],
+                            "anthropic_version": "bedrock-2023-05-31",
+                            "max_tokens": 1024,
+                            "temperature": temperature,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [{"type": "text",
+                                                 "text": prompt}],
+                                }
+                            ],
                         }
-                    ],
-                }
-            ),
-        )
-        result = json.loads(response.get("body").read())
-        output_list = result.get("content", [])
-        return "".join(output["text"] for output in output_list
-                       if output["type"] == "text")
-
+                    ),
+                )
+                break
+            except (TimeoutError, ReadTimeoutError) as ex:
+                print(f"Caught {ex}; sleep & retry #{iter+1}")
+                sleep(iter+1)
+            except Exception as ex:
+                print(f"didn't catch {ex}")
+                raise ex
+        if response:
+            result = json.loads(response.get("body").read())
+            output_list = result.get("content", [])
+            return "".join(output["text"] for output in output_list
+                           if output["type"] == "text")
+        else:
+            return ""
     except ClientError as err:
-        print(f"Error invoking {model_id}: {err.response['Error']['Code']} "
-              f"{err.response['Error']['Message']}")
+        print(f"Error invoking {model_id}:"
+              f" {err.response['Error']['Code']}"
+              f" {err.response['Error']['Message']}")
         raise err
 
 
@@ -357,7 +375,7 @@ def parallel_map(func: Callable, sequence: Iterable, num_threads: Optional[int] 
 
     """
     if num_threads == 1:
-        # Much easier to test if we turn off the concurrent map
+        # Much easier to test if we turn off concurrency
         return map(func, sequence)
     else:
         pool = multiprocessing.dummy.Pool(num_threads)
