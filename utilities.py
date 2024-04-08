@@ -429,24 +429,24 @@ def default_reducer(map_results: Iterable[Union[str, dict]],
     return return_value
 
 
-class RAG_Mode(Enum):
+class Mode(Enum):
     MAP_REDUCE = 0
     FIRST_HIT = 1
 
-def RAG_over_Google(
+def WSAG(
     model_runner: Callable[[str], str],
     company_name: str,
     company_url: str,
-    google_query: str,
+    web_search_query: str,
     num_threads: int,
     search_result_downloader: Callable[[dict, dict], str] = None,
     search_result_mapper: Callable[[dict, str], Union[str, dict]] = None,
     search_result_filter: Optional[Callable[[int, dict], Tuple[bool, str]]] = None,
     search_result_evaluator: Callable[[dict, Union[str, dict]], bool] = None,
     reducer: Callable[[Iterable[Union[str, dict]]], str] = None,
-    num_google_results: Optional[int] = 10,
-    google_timeout: Optional[int] = 30,
-    mode: RAG_Mode = RAG_Mode.MAP_REDUCE,
+    num_web_search_results: Optional[int] = 10,
+    web_search_timeout: Optional[int] = 30,
+    mode: Mode = Mode.MAP_REDUCE,
     result_tag: Optional[str] = "summary"):
     """
     The downloader takes a search result (a dict) and a dict of cached contents
@@ -457,9 +457,9 @@ def RAG_over_Google(
 
     The filter takes a search result (a dict)
     """
-    response_json = google_search(google_query,
-                                  num_results=num_google_results,
-                                  timeout=google_timeout)
+    response_json = google_search(web_search_query,
+                                  num_results=num_web_search_results,
+                                  timeout=web_search_timeout)
     try:
         organic_results = response_json["organic_results"]
     except KeyError:
@@ -480,7 +480,7 @@ def RAG_over_Google(
     else:
         results = organic_results
 
-    if mode.value == RAG_Mode.MAP_REDUCE.value:
+    if mode.value == Mode.MAP_REDUCE.value:
         assert search_result_mapper is not None and search_result_downloader is not None
         if reducer is None:
             reducer = partial(default_reducer, model_runner=model_runner)
@@ -492,7 +492,7 @@ def RAG_over_Google(
                                    results, num_threads=num_threads)
         map_results = filter(None, map_results) # remove empty elements
         return reducer(map_results)
-    elif mode.value == RAG_Mode.FIRST_HIT.value:
+    elif mode.value == Mode.FIRST_HIT.value:
         assert search_result_evaluator is not None
         for i, search_result in enumerate(results):
             print(f"Consider #{i:,} {search_result['link']}")
