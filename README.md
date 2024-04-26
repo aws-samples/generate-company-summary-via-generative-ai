@@ -2,23 +2,23 @@
 
 In today's fast-paced world, staying informed about companies and their activities is crucial for investors, analysts, and professionals across various industries. However, with the ever-increasing volume of information available, keeping up can feel like a Herculean task.  Generative artificial intelligence (AI) can help.
 
-Generative AI, particularly in the realm of natural language (large language models, LLMs), has improved considerably in recent years. It's not just about understanding language anymore; it's about generating it—creating human-like text that is coherent, contextually relevant, and, most importantly, informative.
+Generative AI, particularly in the realm of natural language (large language models, LLMs), has improved considerably in recent years. It's not just about understanding language anymore; it's about generating it: creating human-like text that is coherent, contextually relevant, and, most importantly, informative.
 
 ## Large Language Models and Accuracy
 
-While LLMs are strikingly creative, they still struggle to generate accurate and factual responses. This is because the core part of the pre-training process is typically next token prediction. LLMs are optimized to generate tokens that fit the distribution of their training data—and they do this very well—but they don’t have a world model to ensure that their responses are grounded in reality.  This is a well known problem and many techniques have been developed to better ground LLMs in reality:
+While LLMs are strikingly creative, they still struggle to generate accurate and factual responses. This is because the core part of the pre-training process is typically next token prediction. LLMs are optimized to generate tokens that fit the distribution of their training data—and they do this very well—but they don’t have a world model to ensure that their responses are grounded in reality. (These inaccuracies are commonly referred to as hallucinations or confabulations.) This is a well known problem and many techniques have been developed to better ground LLMs in reality:
 
 * As part of the pre-training process, the model’s weights are adjusted to better align the model with reality. Techniques commonly used here include [Reinforcment Learning from Human Feedback](https://aws.amazon.com/what-is/reinforcement-learning-from-human-feedback/) (RLHF) and [Constitutional AI](https://www.anthropic.com/news/claudes-constitution).
-* A model can be fine-tuned on additional data not included in the pre-training process. This is often used to improve a model’s performance on a specific domain.
+* A model can be fine-tuned on additional data not included in the pre-training process. This can improve a model’s performance on a specific domain.
 * [Retrieval-Augmented Generation](https://aws.amazon.com/what-is/retrieval-augmented-generation/) (RAG) is a broad set of techniques that are used to extract relevant information from external sources and to incorporate those into the LLM’s response.
 * There are many [prompt-engineering](https://en.wikipedia.org/wiki/Prompt_engineering) techniques, such as [Chain-of-Thought prompting](https://arxiv.org/pdf/2201.11903.pdf), that can help the LLM produce more factual and accurate answers.
-* The [ReAct framework](https://arxiv.org/pdf/2210.03629.pdf), also known as the use of [Agents](https://aws.amazon.com/bedrock/agents/), is a way to use an LLM to plan how to break a question down into smaller questions, answer those questions from external sources, and then synthesize a response to the original question.
+* The [ReAct framework](https://arxiv.org/pdf/2210.03629.pdf), also known as the use of [Agents](https://aws.amazon.com/bedrock/agents/), is a way to use an LLM to plan how to break a question down into smaller questions, answer those questions (maybe from external sources), and then synthesize a response to the original question.
 
-In this repo we demonstrate an approach that helps LLMs generate more accurate and factual responses. This approach is a variant of RAG where the retrieval mechanism is a web search. We call this Web Search-Augmented Generation (WSAG). This has four main advantages: 
+In this project we demonstrate an approach that helps LLMs generate more accurate and factual responses. This approach is a variant of RAG where the retrieval mechanism is a web search. We call this Web Search-Augmented Generation (WSAG). WSAG has four main advantages: 
 
 * There is no need to setup a vector database (DB) ahead of time, which can take many hours, WSAG can generate responses immediately. 
 * Vector DBs are static, they will quickly become stale unless a separate process is used to update them. Web search companies already spend a considerable amount of effort keeping their web indices up-to-date and we can piggy back off of that.
-* Web searches can either search a particular web site, or they can use the entire web. With a vector DB you have to decide upfront what web sites to crawl and index. Building a vector DB of a large company’s web site, or multiple web sites, can be slow and expensive.
+* Web searches can either search a particular web site, or they can use the entire web. With a vector DB you have to decide upfront what web sites and other data sources to crawl and index. Building a vector DB of a large company’s web site, or multiple web sites, can be slow and expensive.
 * WSAG provides more ways to optimize results. With standard RAG the retrieval mechanism is driven by the vector similarity between the embedding of the question and the embeddings of the documents (or “chunks”) in the corpus. As we will see later, the WSAG approach provides more ways of tuning the retrieval mechanism to optimize a particular use case.
 
 ## Generating Company Summaries Quickly and Factually
@@ -123,7 +123,7 @@ In summary, we can see that the map-reduce style of WSAG is a fast and flexible 
 
 ## The first-hit flavor of WSAG
 
-The second flavor of WSAG is useful when we just want to find a single web page that contains the result. This can be a useful way of reducing confabulations (also known as hallucinations). As an example, consider generating a description of a particular member, e.g., the CEO of a company’s leadership team. We propose here to do a web search and then, if possible, find the top hit that is from the company’s web site. If that isn’t possible then we can broaden our search to other web pages (not shown in the code below). First, here is the general structure of a first-hit WSAG:
+The second flavor of WSAG is useful when we just want to find a single web page that contains the result. As an example, consider generating a description of a particular member—e.g., the CEO—of a company’s leadership team. We propose here to do a web search and then, if possible, find the top hit that is from the company’s web site. If that isn’t possible then we can broaden our search to other web pages (not shown in the code below). First, here is the general structure of a first-hit WSAG:
 
 ```python
 def WSAG_first_hit(web_search_query: str,
@@ -184,19 +184,7 @@ The user interacts directly with a [Jupyter notebook](./generate-company-summary
 
 ## Prerequisites
 
-The summaries are generated by a Jupyter notebook and requires that the following be installed first:
-
-1. Install pyenv, this lets you install multiple Python interpreters. Follow [these instructions](https://github.com/pyenv/pyenv?tab=readme-ov-file#installation).
-
-2. Using pyenv, install Python 3.10.9. Other Python versions may work but have not been tested.
-
-3. Install [poetry](https://python-poetry.org/docs/).
-
-4. After cloning this repo, in the top-level of the repo create a poetry environment: `poetry install`. Then, to use this environment's Python interpreter: `poetry shell`
-
-5. Create a kernel with these Python dependencies for Jupyter: `python3 -m ipykernel install --user --name generate-company-summary`
-
-6. Create an account at [https://serpapi.com/](https://serpapi.com/) and add your SERP API key in the cell that contains `%env SERPAPI_API_KEY=...`
+The summaries are generated by a Jupyter notebook. If you are running this notebook inside of Sagemaker then you should use the `conda_pytorch_p310` kernel. The first time you run the notebook you should uncomment the `pip install` commands to install the necessary packages. Lastly, you should create an account at [https://serpapi.com/](https://serpapi.com/) and add your SERP API key in the cell that contains `%env SERPAPI_API_KEY=...`
 
 
 ## Running the notebook
@@ -205,7 +193,7 @@ While the Jupyter notebook can be run anywhere, it is easiest to use it within A
 
 ## Conclusions
 
-In this repo we have shown how a new technique, Web Search-Augmented Generation (WSAG), can help generative AI models generate more accurate results. In particular, we have shown how to use WSAG to summarize company web sites quickly, cheaply and accurately.
+In this project we have shown how a new technique, Web Search-Augmented Generation (WSAG), can help generative AI models generate more accurate results when the data sources are public web pages. In particular, we have shown how to use WSAG to summarize company web sites quickly, cheaply and accurately.
 
 
 ## Security
