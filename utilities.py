@@ -21,6 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 from langchain_community.document_loaders import AmazonTextractPDFLoader
 from botocore.exceptions import ClientError, ReadTimeoutError
+from IPython.display import HTML
 
 JENV = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
 
@@ -76,7 +77,7 @@ def download_web_page_as_text(
     """
     resp = download_web_page(URL, mime_type=None, headers=headers)
     if resp and resp.status_code == 200:
-        print(f"headers: {resp.headers}")
+        # print(f"headers: {resp.headers}")
         content_type = resp.headers.get("Content-Type", "unknown")
         if allowable_mime_types is not None and \
            not any(mime_type in content_type
@@ -505,3 +506,19 @@ def WSAG(
                 return mapper_result
     else:
         raise Exception("port me!")
+
+def test_wrapper(caller_globals: dict):
+    """
+    For a given function, foo, that returns an HTML string, create a second
+    function, test_foo, that may (if enable_test_harness is on) run
+    the function and display the results.
+    """
+    def test_wrapper2(func):
+        def f(*args, **kwargs):
+            if caller_globals["enable_test_harness"]:
+                return HTML(func(*args, **kwargs))
+            else:
+                return None
+        caller_globals[f"test_{func.__name__}"] = f
+        return func
+    return test_wrapper2
