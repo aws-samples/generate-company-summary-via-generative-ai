@@ -37,6 +37,8 @@ def google_search(q: str, num_results: int = 5, timeout: int = 20):
     )
     response = requests.get("https://serpapi.com/search/",
                             params=params, timeout=timeout)
+    if "error" in response.json() and "Invalid API key" in response.json()["error"]:
+        raise Exception("Invalid SERP_API_KEY")
     return response.json()
 
 
@@ -491,7 +493,7 @@ def WSAG(
                                                         search_result=result,
                                                         cached_contents=cached_contents)),
                                    results, num_threads=num_threads)
-        map_results = filter(None, map_results) # remove empty elements
+        map_results = filter(None, map_results)  # remove empty elements
         return reducer(map_results)
     elif mode.value == Mode.FIRST_HIT.value:
         assert search_result_evaluator is not None
@@ -499,13 +501,15 @@ def WSAG(
             print(f"Consider #{i:,} {search_result['link']}")
             mapper_result = search_result_mapper(
                               search_result=search_result,
-                              text_contents=search_result_downloader(search_result=search_result,
-                                                                     cached_contents=cached_contents))
+                              text_contents=search_result_downloader(
+                                  search_result=search_result,
+                                  cached_contents=cached_contents))
             if search_result_evaluator(search_result,
                                        mapper_result=mapper_result):
                 return mapper_result
     else:
         raise Exception("port me!")
+
 
 def test_wrapper(caller_globals: dict):
     """
